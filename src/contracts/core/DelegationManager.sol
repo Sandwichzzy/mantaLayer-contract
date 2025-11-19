@@ -57,12 +57,92 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
     /*******************************************************************************
                             EXTERNAL FUNCTIONS
     *******************************************************************************/
+
+    //将operator的链下信息提交到链上，例如：节点p2p通信链接
+    function registerAsOperator(OperatorDetails calldata registeringOperatorDetails, string calldata nodeUrl) external {
+        require(
+            _operatorDetails[msg.sender].earningsReceiver == address(0),
+            "DelegationManager.registerAsOperator: Operator already registered"
+        );
+        _setOperatorDetails(msg.sender, registeringOperatorDetails);
+        SignatureWithExpiry memory emptySignatureAndExpiry;
+        _delegate(msg.sender, msg.sender, emptySignatureAndExpiry, bytes32(0));
+        emit OperatorRegistered(msg.sender, registeringOperatorDetails);
+        emit OperatorNodeUrlUpdated(msg.sender, nodeUrl);
+    }
+
     function setMinWithdrawalDelayBlocks(uint256 newMinWithdrawalDelayBlocks) external onlyOwner {
         _setMinWithdrawalDelayBlocks(newMinWithdrawalDelayBlocks);
     }
+
     /*******************************************************************************
                             INTERNAL FUNCTIONS
     *******************************************************************************/
+    function _setOperatorDetails(address operator, OperatorDetails calldata newOperatorDetails) internal {
+        //非零地址判断
+        require(
+            newOperatorDetails.earningsReceiver != address(0),
+            "DelegationManager._setOperatorDetails: earningsReceiver cannot be address(0)"
+        );
+        //质押周期判断
+        require(
+            newOperatorDetails.stakerOptOutWindowBlocks <= MAX_STAKER_OPT_OUT_WINDOW_BLOCKS,
+            "DelegationManager._setOperatorDetails: stakerOptOutWindowBlocks cannot be > MAX_STAKER_OPT_OUT_WINDOW_BLOCKS"
+        );
+        require(
+            newOperatorDetails.stakerOptOutWindowBlocks >= _operatorDetails[operator].stakerOptOutWindowBlocks,
+            "DelegationManager._setOperatorDetails: stakerOptOutWindowBlocks cannot be decreased"
+        );
+        _operatorDetails[operator] = newOperatorDetails;
+        emit OperatorDetailsModified(msg.sender, newOperatorDetails);
+    }
+
+    function _delegate(
+        address staker,
+        address operator,
+        SignatureWithExpiry memory approverSignatureAndExpiry,
+        bytes32 approverSalt
+    ) internal {
+        //判断staker是否已经委托给了某个operator，operator是否已经注册
+        require(!isDelegated(staker), "DelegationManager._delegate: staker is already actively delegated");
+        require(isOperator(operator), "DelegationManager._delegate: operator is not registered in MantaLayer");
+        address _delegationApprover = _operatorDetails[operator].delegationApprover;
+
+        //授权者验证
+        if (_delegationApprover != address(0) && msg.sender != _delegationApprover && msg.sender != operator) {
+            require(
+                approverSignatureAndExpiry.expiry >= block.timestamp,
+                "DelegationManager._delegate: Delegation approval signature expired"
+            );
+            require(
+                !delegationApproverSaltIsSpent[_delegationApprover][approverSalt],
+                "DelegationManager._delegate: approverSalt already spent"
+            );
+            delegationApproverSaltIsSpent[_delegationApprover][approverSalt] = true;
+
+            bytes32 approverDigestHash = calculateDelegationApprovalDigestHash(
+                staker, operator, _delegationApprover, approverSalt, approverSignatureAndExpiry.expiry
+            );
+
+            EIP1271SignatureUtils.checkSignature_EIP1271(
+                _delegationApprover, approverDigestHash, approverSignatureAndExpiry.signature
+            );
+        }
+        //将operator和staker的委托关系记录在链上
+        delegatedTo[staker] = operator;
+        emit StakerDelegated(staker, operator);
+        //获取staker在各个策略中质押的shares
+        (IStrategyBase[] memory strategies, uint256[] memory shares) = getDelegatableShares(staker);
+        //将staker在各个策略中的质押份额shares 委托给 operator
+        for (uint256 i = 0; i < strategies.length;) {
+            //使用命名参数调用函数，提升可读性， 参数顺序可以任意调整
+            _increaseOperatorShares({operator: operator, staker: staker, strategy: strategies[i], shares: shares[i]});
+            //禁用溢出检查 节省gas
+            unchecked {
+                ++i;
+            }
+        }
+    }
 
     function _setMinWithdrawalDelayBlocks(uint256 _minWithdrawalDelayBlocks) internal {
         require(
@@ -94,5 +174,55 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
                 strategy, prevStrategyWithdrawalDelayBlocks, newStrategyWithdrawalDelayBlocks
             );
         }
+    }
+
+    function _calculateDomainSeparator() internal view returns (bytes32) {
+        return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes("MantaLayer")), block.chainid, address(this)));
+    }
+
+    function _increaseOperatorShares(address operator, address staker, IStrategyBase strategy, uint256 shares)
+        internal
+    {
+        operatorShares[operator][strategy] += shares;
+        emit OperatorSharesIncreased(operator, staker, strategy, shares);
+    }
+
+    /*******************************************************************************
+                            VIEW FUNCTIONS
+    *******************************************************************************/
+    function domainSeparator() public view returns (bytes32) {
+        if (block.chainid == ORIGINAL_CHAIN_ID) {
+            return _DOMAIN_SEPARATOR;
+        } else {
+            return _calculateDomainSeparator();
+        }
+    }
+
+    function isDelegated(address staker) public view returns (bool) {
+        return (delegatedTo[staker] != address(0));
+    }
+
+    function isOperator(address operator) public view returns (bool) {
+        return (_operatorDetails[operator].earningsReceiver != address(0));
+    }
+
+    function calculateDelegationApprovalDigestHash(
+        address staker,
+        address operator,
+        address _delegationApprover,
+        bytes32 approverSalt,
+        uint256 expiry
+    ) public view returns (bytes32) {
+        bytes32 approverStructHash = keccak256(
+            abi.encode(DELEGATION_APPROVAL_TYPEHASH, staker, operator, _delegationApprover, approverSalt, expiry)
+        );
+        bytes32 approverDigestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), approverStructHash));
+        return approverDigestHash;
+    }
+
+    function getDelegatableShares(address staker) public view returns (IStrategyBase[] memory, uint256[] memory) {
+        (IStrategyBase[] memory strategyManagerStrats, uint256[] memory strategyManagerShares) =
+            i_strategyManager.getDeposits(staker);
+        return (strategyManagerStrats, strategyManagerShares);
     }
 }
