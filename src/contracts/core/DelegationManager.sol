@@ -109,6 +109,52 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         _delegate(staker, operator, approverSignatureAndExpiry, approverSalt);
     }
 
+    //解质押会触发staker全部取款
+    function undelegate(address staker) external returns (bytes32[] memory withdrawalRoots) {
+        //staker 必须已经被委托才能undelegate
+        require(isDelegated(staker), "DelegationManager.undelegate: staker must be delegated to undelegate");
+        require(!isOperator(staker), "DelegationManager.undelegate: operators cannot be undelegated"); //operator自我委托不允许undelegate
+        require(staker != address(0), "DelegationManager.undelegate: cannot undelegate zero address");
+        address operator = delegatedTo[staker];
+        //只能是staker本人，operator，或者operator的delegationApprover来调用undelegate函数
+        require(
+            msg.sender == staker || msg.sender == operator
+                || msg.sender == _operatorDetails[operator].delegationApprover,
+            "DelegationManager.undelegate: caller must be staker or operator or approver"
+        );
+        //获取staker在各个策略中质押的shares，返回数组
+        (IStrategyBase[] memory strategies, uint256[] memory shares) = getDelegatableShares(staker);
+        if (msg.sender != staker) {
+            emit StakerForceUndelegated(staker, operator);
+        }
+        emit StakerUndelegated(staker, operator);
+        //将staker和operator之间的委托关系移除
+        delegatedTo[staker] = address(0);
+
+        if (strategies.length == 0) {
+            withdrawalRoots = new bytes32[](0);
+        } else {
+            withdrawalRoots = new bytes32[](strategies.length);
+            for (uint256 i = 0; i < strategies.length; i++) {
+                IStrategyBase[] memory singleStrategy = new IStrategyBase[](1);
+                uint256[] memory singleShare = new uint256[](1);
+                singleStrategy[0] = strategies[i];
+                singleShare[0] = shares[i];
+                // IStrategyBase singleStrategy = strategies[i];
+                // uint256 singleShare = shares[i];
+                //将stake委托给operator的shares移除，并将staker在策略里面shares清0, 生成排队取款的交易
+                withdrawalRoots[i] = _removeSharesAndQueueWithdrawal({
+                    staker: staker,
+                    operator: operator,
+                    withdrawer: staker,
+                    strategies: singleStrategy,
+                    shares: singleShare
+                });
+            }
+        }
+        return withdrawalRoots;
+    }
+
     function setMinWithdrawalDelayBlocks(uint256 newMinWithdrawalDelayBlocks) external onlyOwner {
         _setMinWithdrawalDelayBlocks(newMinWithdrawalDelayBlocks);
     }
@@ -119,7 +165,17 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
     {
         if (isDelegated(staker)) {
             address operator = delegatedTo[staker];
-            _increaseOperatorShares(operator, staker, strategy, shares);
+            _increaseOperatorShares({operator: operator, staker: staker, strategy: strategy, shares: shares});
+        }
+    }
+
+    function decreaseDelegatedShares(address staker, IStrategyBase strategy, uint256 shares)
+        external
+        onlyStrategyManager
+    {
+        if (isDelegated(staker)) {
+            address operator = delegatedTo[staker];
+            _decreaseOperatorShares({operator: operator, staker: staker, strategy: strategy, shares: shares});
         }
     }
 
@@ -235,6 +291,63 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         emit OperatorSharesIncreased(operator, staker, strategy, shares);
     }
 
+    function _decreaseOperatorShares(address operator, address staker, IStrategyBase strategy, uint256 shares)
+        internal
+    {
+        operatorShares[operator][strategy] -= shares;
+        emit OperatorSharesDecreased(operator, staker, strategy, shares);
+    }
+
+    function _removeSharesAndQueueWithdrawal(
+        address staker,
+        address operator,
+        address withdrawer,
+        IStrategyBase[] memory strategies,
+        uint256[] memory shares
+    ) internal returns (bytes32) {
+        require(
+            staker != address(0), "DelegationManager._removeSharesAndQueueWithdrawal: staker cannot be zero address"
+        );
+        require(strategies.length != 0, "DelegationManager._removeSharesAndQueueWithdrawal: strategies cannot be empty");
+        for (uint256 i = 0; i < strategies.length;) {
+            if (operator != address(0)) {
+                //解除staker委托给operator的shares,若是全部取款，其实就是清零了
+                _decreaseOperatorShares({
+                    operator: operator, staker: staker, strategy: strategies[i], shares: shares[i]
+                });
+            }
+            require(
+                //如果thirdPartyTransfersForbidden为true，则withdrawer必须是staker自己
+                staker == withdrawer || !i_strategyManager.thirdPartyTransfersForbidden(strategies[i]),
+                "DelegationManager._removeSharesAndQueueWithdrawal: withdrawer must be same address as staker if thirdPartyTransfersForbidden are set"
+            );
+            //解除staker在策略中的shares
+            i_strategyManager.removeShares(staker, strategies[i], shares[i]);
+            unchecked {
+                ++i;
+            }
+        }
+        uint256 nonce = cumulativeWithdrawalsQueued[staker];
+        cumulativeWithdrawalsQueued[staker]++;
+
+        Withdrawal memory withdrawal = Withdrawal({
+            staker: staker,
+            delegatedTo: operator,
+            withdrawer: withdrawer,
+            nonce: nonce,
+            startBlock: uint32(block.number),
+            strategies: strategies,
+            shares: shares
+        });
+
+        bytes32 withdrawalRoot = calculateWithdrawalRoot(withdrawal);
+
+        pendingWithdrawals[withdrawalRoot] = true;
+
+        emit WithdrawalQueued(withdrawalRoot, withdrawal);
+        return withdrawalRoot;
+    }
+
     /*******************************************************************************
                             VIEW FUNCTIONS
     *******************************************************************************/
@@ -258,6 +371,10 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         (IStrategyBase[] memory strategyManagerStrats, uint256[] memory strategyManagerShares) =
             i_strategyManager.getDeposits(staker);
         return (strategyManagerStrats, strategyManagerShares);
+    }
+
+    function calculateWithdrawalRoot(Withdrawal memory withdrawal) public pure returns (bytes32) {
+        return keccak256(abi.encode(withdrawal));
     }
 
     function calculateCurrentStakerDelegationDigestHash(address staker, address operator, uint256 expiry)

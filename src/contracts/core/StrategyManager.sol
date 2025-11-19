@@ -94,6 +94,11 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         shares = _depositIntoStrategy(staker, strategy, tokenAddress, amount);
     }
 
+    //解除staker在策略中的shares
+    function removeShares(address staker, IStrategyBase strategy, uint256 shares) external onlyDelegationManager {
+        _removeShares(staker, strategy, shares);
+    }
+
     //计算域分隔符,防止跨链重放攻击
     function domainSeparator() public view returns (bytes32) {
         if (block.chainid == ORIGINAL_CHAIN_ID) {
@@ -204,6 +209,42 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         stakerStrategyShares[staker][strategy] += shares;
 
         emit Deposit(staker, mantaToken, strategy, shares);
+    }
+
+    function _removeShares(address staker, IStrategyBase strategy, uint256 shareAmount) internal returns (bool) {
+        require(shareAmount != 0, "StrategyManager._removeShares: shareAmount should not be zero!");
+
+        uint256 userShares = stakerStrategyShares[staker][strategy];
+
+        require(shareAmount <= userShares, "StrategyManager._removeShares: shareAmount too high");
+        unchecked {
+            userShares -= shareAmount;
+        }
+
+        stakerStrategyShares[staker][strategy] = userShares;
+        if (userShares == 0) {
+            //从质押池中移除该策略
+            _removeStrategyFormStakerStrategyList(staker, strategy);
+            return true;
+        }
+        return false;
+    }
+
+    //完全取款时，对应策略已经没有shares了，需要将shares从stakerStrategyList中移除
+    function _removeStrategyFormStakerStrategyList(address staker, IStrategyBase strategy) internal {
+        uint256 stratsLength = stakerStrategyList[staker].length;
+        uint256 j = 0;
+        for (; j < stratsLength;) {
+            if (stakerStrategyList[staker][j] == strategy) {
+                stakerStrategyList[staker][j] = stakerStrategyList[staker][stratsLength - 1];
+                break;
+            }
+            unchecked {
+                ++j;
+            }
+        }
+        require(j != stratsLength, "StrategyManager._removeStrategyFromStakerStrategyList: strategy not found");
+        stakerStrategyList[staker].pop();
     }
 
     function _setThirdPartyTransfersForbidden(IStrategyBase strategy, bool value) internal {

@@ -55,7 +55,7 @@ interface IDelegationManager is ISignatureUtils {
      * @param staker 质押者地址
      * @param delegatedTo 提款时委托的操作员地址
      * @param withdrawer 提款接收者地址（可以与质押者不同）
-     * @param nonce 提款随机数
+     * @param nonce 提款交易的随机数
      * @param startBlock 提款开始的区块号
      * @param strategies 涉及的策略列表
      * @param shares 每个策略对应的份额数量
