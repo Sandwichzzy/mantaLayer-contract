@@ -63,9 +63,103 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         shares = _depositIntoStrategy(msg.sender, strategy, tokenAddress, amount);
     }
 
+    function depositIntoStrategyWithSignature(
+        IStrategyBase strategy,
+        IERC20 tokenAddress,
+        uint256 amount,
+        address staker,
+        uint256 expiry,
+        bytes calldata signature
+    ) external nonReentrant returns (uint256 shares) {
+        require(
+            !thirdPartyTransfersForbidden[strategy],
+            "StrategyManager.depositIntoStrategyWithSignature: third transfers disabled"
+        );
+
+        require(expiry >= block.timestamp, "StrategyManager.depositIntoStrategyWithSignature: signature expired");
+        uint256 nonce = nonces[staker];
+        //计算结构哈希
+        bytes32 structHash =
+            keccak256(abi.encode(DEPOSIT_TYPEHASH, staker, strategy, tokenAddress, amount, nonce, expiry));
+
+        unchecked {
+            nonces[staker] = nonce + 1;
+        }
+        //计算最终摘要哈希
+        // EIP-712 前缀+ 域分隔符+ 结构哈希
+        bytes32 digestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+
+        EIP1271SignatureUtils.checkSignature_EIP1271(staker, digestHash, signature);
+
+        shares = _depositIntoStrategy(staker, strategy, tokenAddress, amount);
+    }
+
+    //计算域分隔符,防止跨链重放攻击
+    function domainSeparator() public view returns (bytes32) {
+        if (block.chainid == ORIGINAL_CHAIN_ID) {
+            return _DOMAIN_SEPARATOR;
+        } else {
+            return _calculateDomainSeparator();
+        }
+    }
+
+    function addShares(address staker, IERC20 mantaToken, IStrategyBase strategy, uint256 shares)
+        external
+        onlyDelegationManager
+    {
+        _addShares(staker, mantaToken, strategy, shares);
+    }
+
+    function getStakerStrategyShares(address user, IStrategyBase strategy) external view returns (uint256 shares) {
+        return stakerStrategyShares[user][strategy];
+    }
+
+    function setStrategyWhitelister(address newStrategyWhitelister) external onlyOwner {
+        _setStrategyWhitelister(newStrategyWhitelister);
+    }
+
+    function addStrategiesToDepositWhitelist(
+        IStrategyBase[] calldata strategiesToWhitelist,
+        bool[] calldata thirdPartyTransfersForbiddenValues
+    ) external onlyStrategyWhitelister {
+        require(
+            strategiesToWhitelist.length == thirdPartyTransfersForbiddenValues.length,
+            "StrategyManager.addStrategiesToDepositWhitelist: array lengths do not match"
+        );
+        uint256 strategiesToWhitelistLength = strategiesToWhitelist.length;
+        for (uint256 i = 0; i < strategiesToWhitelistLength;) {
+            if (!strategyIsWhitelistedForDeposit[strategiesToWhitelist[i]]) {
+                strategyIsWhitelistedForDeposit[strategiesToWhitelist[i]] = true;
+                emit StrategyAddedToDepositWhitelist(strategiesToWhitelist[i]);
+                _setThirdPartyTransfersForbidden(strategiesToWhitelist[i], thirdPartyTransfersForbiddenValues[i]);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function removeStrategiesFromDepositWhitelist(IStrategyBase[] calldata strategiesToRemoveFromWhitelist)
+        external
+        onlyStrategyWhitelister
+    {
+        uint256 strategiesToRemoveFromWhitelistLength = strategiesToRemoveFromWhitelist.length;
+        for (uint256 i = 0; i < strategiesToRemoveFromWhitelistLength;) {
+            if (strategyIsWhitelistedForDeposit[strategiesToRemoveFromWhitelist[i]]) {
+                strategyIsWhitelistedForDeposit[strategiesToRemoveFromWhitelist[i]] = false;
+                emit StrategyRemovedFromDepositWhitelist(strategiesToRemoveFromWhitelist[i]);
+                _setThirdPartyTransfersForbidden(strategiesToRemoveFromWhitelist[i], false);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /*******************************************************************************
                             INTERNAL FUNCTIONS
     *******************************************************************************/
+    // 域分隔符计算 typehash+name+(version)+chainid+合约地址+(salt)
     function _calculateDomainSeparator() internal view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes("MantaLayer")), block.chainid, address(this)));
     }
@@ -110,5 +204,31 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         stakerStrategyShares[staker][strategy] += shares;
 
         emit Deposit(staker, mantaToken, strategy, shares);
+    }
+
+    function _setThirdPartyTransfersForbidden(IStrategyBase strategy, bool value) internal {
+        thirdPartyTransfersForbidden[strategy] = value;
+        emit UpdatedThirdPartyTransfersForbidden(strategy, value);
+    }
+
+    /*******************************************************************************
+                            VIEW FUNCTIONS
+    *******************************************************************************/
+
+    function getDeposits(address staker) external view returns (IStrategyBase[] memory, uint256[] memory) {
+        uint256 strategiesLength = stakerStrategyList[staker].length;
+        uint256[] memory shares = new uint256[](strategiesLength);
+        for (uint256 i = 0; i < strategiesLength;) {
+            //stakerStrategyShares[质押者地址][策略合约] => 份额数量
+            shares[i] = stakerStrategyShares[staker][stakerStrategyList[staker][i]];
+            unchecked {
+                ++i;
+            }
+        }
+        return (stakerStrategyList[staker], shares);
+    }
+
+    function stakerStrategyListLength(address staker) external view returns (uint256) {
+        return stakerStrategyList[staker].length;
     }
 }

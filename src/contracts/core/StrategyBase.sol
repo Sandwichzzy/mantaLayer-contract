@@ -151,7 +151,7 @@ contract StrategyBase is Initializable, IStrategyBase, Pausable {
     }
 
     function shares(address user) public view virtual returns (uint256) {
-        return strategyManager.stakerStrategyShares(user, IStrategyBase(address(this)));
+        return i_strategyManager.stakerStrategyShares(user, IStrategyBase(address(this)));
     }
 
     /*******************************************************************************

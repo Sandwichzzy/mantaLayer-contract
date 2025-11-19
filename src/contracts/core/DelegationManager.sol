@@ -71,8 +71,56 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         emit OperatorNodeUrlUpdated(msg.sender, nodeUrl);
     }
 
+    function modifyOperatorDetails(OperatorDetails calldata newOperatorDetails) external {
+        require(isOperator(msg.sender), "DelegationManager.modifyOperatorDetails: caller must be an operator");
+        _setOperatorDetails(msg.sender, newOperatorDetails);
+    }
+
+    function updateOperatorNodeUrl(string calldata nodeUrl) external {
+        require(isOperator(msg.sender), "DelegationManager.updateOperatorNodeUrl: caller must be an operator");
+        emit OperatorNodeUrlUpdated(msg.sender, nodeUrl);
+    }
+
+    function delegateTo(address operator, SignatureWithExpiry memory approverSignatureAndExpiry, bytes32 approverSalt)
+        external
+        nonReentrant
+    {
+        _delegate(msg.sender, operator, approverSignatureAndExpiry, approverSalt);
+    }
+
+    function delegateToBySignature(
+        address staker,
+        address operator,
+        SignatureWithExpiry memory stakerSignatureAndExpiry,
+        SignatureWithExpiry memory approverSignatureAndExpiry,
+        bytes32 approverSalt
+    ) external {
+        require(
+            stakerSignatureAndExpiry.expiry >= block.timestamp,
+            "DelegationManager.delegateToBySignature: staker signature expired"
+        );
+        uint256 currentStakeNoce = stakerNonce[staker];
+        bytes32 stakerDigestHash =
+            calculateStakerDelegationDigestHash(staker, currentStakeNoce, operator, stakerSignatureAndExpiry.expiry);
+        unchecked {
+            stakerNonce[staker] = currentStakeNoce + 1;
+        }
+        EIP1271SignatureUtils.checkSignature_EIP1271(staker, stakerDigestHash, stakerSignatureAndExpiry.signature);
+        _delegate(staker, operator, approverSignatureAndExpiry, approverSalt);
+    }
+
     function setMinWithdrawalDelayBlocks(uint256 newMinWithdrawalDelayBlocks) external onlyOwner {
         _setMinWithdrawalDelayBlocks(newMinWithdrawalDelayBlocks);
+    }
+
+    function increaseDelegatedShares(address staker, IStrategyBase strategy, uint256 shares)
+        external
+        onlyStrategyManager
+    {
+        if (isDelegated(staker)) {
+            address operator = delegatedTo[staker];
+            _increaseOperatorShares(operator, staker, strategy, shares);
+        }
     }
 
     /*******************************************************************************
@@ -206,6 +254,35 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         return (_operatorDetails[operator].earningsReceiver != address(0));
     }
 
+    function getDelegatableShares(address staker) public view returns (IStrategyBase[] memory, uint256[] memory) {
+        (IStrategyBase[] memory strategyManagerStrats, uint256[] memory strategyManagerShares) =
+            i_strategyManager.getDeposits(staker);
+        return (strategyManagerStrats, strategyManagerShares);
+    }
+
+    function calculateCurrentStakerDelegationDigestHash(address staker, address operator, uint256 expiry)
+        external
+        view
+        returns (bytes32)
+    {
+        uint256 currentStakerNonce = stakerNonce[staker];
+        return calculateStakerDelegationDigestHash(staker, currentStakerNonce, operator, expiry);
+    }
+
+    function calculateStakerDelegationDigestHash(
+        address staker,
+        uint256 _stakerNonce,
+        address operator,
+        uint256 expiry
+    ) public view returns (bytes32) {
+        //计算质押者委托的类型hash
+        bytes32 stakerStructHash =
+            keccak256(abi.encode(STAKER_DELEGATION_TYPEHASH, staker, operator, _stakerNonce, expiry));
+        //计算最终摘要哈希
+        bytes32 stakerDigestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), stakerStructHash));
+        return stakerDigestHash;
+    }
+
     function calculateDelegationApprovalDigestHash(
         address staker,
         address operator,
@@ -213,16 +290,11 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         bytes32 approverSalt,
         uint256 expiry
     ) public view returns (bytes32) {
+        //委托批准的类型哈希，用于验证operator批准者的签名
         bytes32 approverStructHash = keccak256(
             abi.encode(DELEGATION_APPROVAL_TYPEHASH, staker, operator, _delegationApprover, approverSalt, expiry)
         );
         bytes32 approverDigestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), approverStructHash));
         return approverDigestHash;
-    }
-
-    function getDelegatableShares(address staker) public view returns (IStrategyBase[] memory, uint256[] memory) {
-        (IStrategyBase[] memory strategyManagerStrats, uint256[] memory strategyManagerShares) =
-            i_strategyManager.getDeposits(staker);
-        return (strategyManagerStrats, strategyManagerShares);
     }
 }

@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-//EIP-1271 使得智能合约可以像外部账户一样进行签名验证
+//EIP-1271 使得智能合约可以像外部账户一样进行签名验证(合约钱包)
 library EIP1271SignatureUtils {
     bytes4 internal constant EIP1271_MAGICVALUE = 0x1626ba7e; // EIP-1271 标准定义的成功返回值
 
