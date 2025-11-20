@@ -138,11 +138,6 @@ interface IDelegationManager is ISignatureUtils {
     /// @param shares 提款的份额数量
     event WithdrawalCompleted(address operator, address staker, IStrategyBase strategy, uint256 shares);
 
-    /// @notice 当提款从旧系统迁移到新系统时触发
-    /// @param oldWithdrawalRoot 旧的提款根哈希
-    /// @param newWithdrawalRoot 新的提款根哈希
-    event WithdrawalMigrated(bytes32 oldWithdrawalRoot, bytes32 newWithdrawalRoot);
-
     /// @notice 当最小提款延迟区块数被设置时触发
     /// @param previousValue 之前的值
     /// @param newValue 新的值
@@ -429,11 +424,4 @@ interface IDelegationManager is ISignatureUtils {
      * @return 提款根哈希
      */
     function calculateWithdrawalRoot(Withdrawal memory withdrawal) external pure returns (bytes32);
-
-    /**
-     * @notice 迁移旧版本的排队提款到新版本
-     * @param withdrawalsToQueue 要迁移的旧版本提款数组
-     */
-    function migrateQueuedWithdrawals(IStrategyManager.DeprecatedStruct_QueuedWithdrawal[] memory withdrawalsToQueue)
-        external;
 }

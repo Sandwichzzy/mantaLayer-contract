@@ -38,9 +38,6 @@ abstract contract StrategyManagerStorage is IStrategyManager {
     /// @notice 策略白名单管理员地址，有权添加/移除白名单策略
     address public strategyWhitelister;
 
-    /// @notice 提款延迟区块数（已弃用，由 DelegationManager 管理）
-    uint256 internal withdrawalDelayBlocks;
-
     /// @notice 记录每个质押者在每个策略中的份额数量
     /// @dev 映射: 质押者地址 => 策略合约 => 份额数量
     mapping(address => mapping(IStrategyBase => uint256)) public stakerStrategyShares;
@@ -48,13 +45,6 @@ abstract contract StrategyManagerStorage is IStrategyManager {
     /// @notice 记录每个质押者参与的策略列表
     /// @dev 映射: 质押者地址 => 策略合约数组
     mapping(address => IStrategyBase[]) public stakerStrategyList;
-
-    /// @notice 记录待处理的提款根哈希（已弃用，由 DelegationManager 管理）
-    /// @dev 映射: 提款根哈希 => 是否待处理
-    mapping(bytes32 => bool) public withdrawalRootPending;
-
-    /// @notice 记录每个地址排队的提款数量（已弃用，由 DelegationManager 管理）
-    mapping(address => uint256) internal numWithdrawalsQueued;
 
     /// @notice 记录策略是否在存款白名单中
     /// @dev 只有白名单中的策略才能接受存款

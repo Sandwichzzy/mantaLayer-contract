@@ -62,9 +62,6 @@ abstract contract DelegationManagerStorage is IDelegationManager {
     /// @notice 记录每个质押者累计排队的提款次数
     mapping(address => uint256) public cumulativeWithdrawalsQueued;
 
-    /// @notice 已弃用的质押注册表地址（保留以维护存储布局）
-    address private __deprecated_stakeRegistry;
-
     /// @notice 每个策略的提款延迟区块数
     /// @dev 映射: 策略合约 => 延迟区块数
     mapping(IStrategyBase => uint256) public strategyWithdrawalDelayBlocks;

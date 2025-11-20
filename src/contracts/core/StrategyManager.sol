@@ -8,8 +8,10 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "./StrategyManagerStorage.sol";
 import "../../libraries/EIP1271SignatureUtils.sol";
+import "../../access/Pausable.sol";
+import "../../access/interfaces/IPauserRegistry.sol";
 
-contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, StrategyManagerStorage {
+contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, Pausable, StrategyManagerStorage {
     using SafeERC20 for IERC20;
 
     uint8 internal constant PAUSED_DEPOSITS = 0;
@@ -42,10 +44,17 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
                             INITIALIZING FUNCTIONS
     *******************************************************************************/
     constructor(IDelegationManager _delegation) StrategyManagerStorage(_delegation) {
+        ORIGINAL_CHAIN_ID = block.chainid;
         _disableInitializers();
     }
 
-    function initialize(address initialOwner, address initialStrategyWhitelister) external initializer {
+    function initialize(
+        address initialOwner,
+        address initialStrategyWhitelister,
+        IPauserRegistry _pauserRegistry,
+        uint256 initialPausedStatus
+    ) external initializer {
+        _initializePauser(_pauserRegistry, initialPausedStatus);
         _DOMAIN_SEPARATOR = _calculateDomainSeparator();
         _transferOwnership(initialOwner);
         _setStrategyWhitelister(initialStrategyWhitelister);
@@ -58,6 +67,7 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
     function depositIntoStrategy(IStrategyBase strategy, IERC20 tokenAddress, uint256 amount)
         external
         nonReentrant
+        onlyWhenNotPaused(PAUSED_DEPOSITS)
         returns (uint256 shares)
     {
         shares = _depositIntoStrategy(msg.sender, strategy, tokenAddress, amount);
@@ -70,7 +80,7 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         address staker,
         uint256 expiry,
         bytes calldata signature
-    ) external nonReentrant returns (uint256 shares) {
+    ) external nonReentrant onlyWhenNotPaused(PAUSED_DEPOSITS) returns (uint256 shares) {
         require(
             !thirdPartyTransfersForbidden[strategy],
             "StrategyManager.depositIntoStrategyWithSignature: third transfers disabled"
@@ -124,21 +134,6 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
 
     function getStakerStrategyShares(address user, IStrategyBase strategy) external view returns (uint256 shares) {
         return stakerStrategyShares[user][strategy];
-    }
-
-    //迁移旧版本的排队提款
-    function migrateQueuedWithdrawal(DeprecatedStruct_QueuedWithdrawal memory queuedWithdrawal)
-        external
-        onlyDelegationManager
-        returns (bool, bytes32)
-    {
-        bytes32 existingWithdrawalRoot = calculateWithdrawalRoot(queuedWithdrawal);
-        bool isDeleted;
-        if (withdrawalRootPending[existingWithdrawalRoot]) {
-            withdrawalRootPending[existingWithdrawalRoot] = false;
-            isDeleted = true;
-        }
-        return (isDeleted, existingWithdrawalRoot);
     }
 
     function setStrategyWhitelister(address newStrategyWhitelister) external onlyOwner {
@@ -293,22 +288,5 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
 
     function stakerStrategyListLength(address staker) external view returns (uint256) {
         return stakerStrategyList[staker].length;
-    }
-
-    function calculateWithdrawalRoot(DeprecatedStruct_QueuedWithdrawal memory queuedWithdrawal)
-        public
-        pure
-        returns (bytes32)
-    {
-        return (keccak256(
-                abi.encode(
-                    queuedWithdrawal.strategies,
-                    queuedWithdrawal.shares,
-                    queuedWithdrawal.staker,
-                    queuedWithdrawal.withdrawerAndNonce,
-                    queuedWithdrawal.withdrawalStartBlock,
-                    queuedWithdrawal.delegatedAddress
-                )
-            ));
     }
 }

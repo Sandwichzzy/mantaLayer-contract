@@ -84,6 +84,7 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
     function delegateTo(address operator, SignatureWithExpiry memory approverSignatureAndExpiry, bytes32 approverSalt)
         external
         nonReentrant
+        onlyWhenNotPaused(PAUSED_NEW_DELEGATION)
     {
         _delegate(msg.sender, operator, approverSignatureAndExpiry, approverSalt);
     }
@@ -94,7 +95,7 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         SignatureWithExpiry memory stakerSignatureAndExpiry,
         SignatureWithExpiry memory approverSignatureAndExpiry,
         bytes32 approverSalt
-    ) external {
+    ) external onlyWhenNotPaused(PAUSED_NEW_DELEGATION) {
         require(
             stakerSignatureAndExpiry.expiry >= block.timestamp,
             "DelegationManager.delegateToBySignature: staker signature expired"
@@ -158,6 +159,7 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
     //部分取款，和undelegate区别是没有解除委托关系
     function queueWithdrawals(QueuedWithdrawalParams[] calldata queuedWithdrawalParams)
         external
+        onlyWhenNotPaused(PAUSED_ENTER_WITHDRAWAL_QUEUE)
         returns (bytes32[] memory)
     {
         bytes32[] memory withdrawalRoots = new bytes32[](queuedWithdrawalParams.length);
@@ -179,11 +181,19 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         return withdrawalRoots;
     }
 
-    function completeQueuedWithdrawal(Withdrawal calldata withdrawal, IERC20 mantaToken) external nonReentrant {
+    function completeQueuedWithdrawal(Withdrawal calldata withdrawal, IERC20 mantaToken)
+        external
+        nonReentrant
+        onlyWhenNotPaused(PAUSED_EXIT_WITHDRAWAL_QUEUE)
+    {
         _completeQueuedWithdrawal(withdrawal, mantaToken);
     }
 
-    function completeQueuedWithdrawals(Withdrawal[] calldata withdrawals, IERC20 mantaToken) external nonReentrant {
+    function completeQueuedWithdrawals(Withdrawal[] calldata withdrawals, IERC20 mantaToken)
+        external
+        nonReentrant
+        onlyWhenNotPaused(PAUSED_EXIT_WITHDRAWAL_QUEUE)
+    {
         for (uint256 i = 0; i < withdrawals.length; ++i) {
             _completeQueuedWithdrawal(withdrawals[i], mantaToken);
         }
@@ -218,42 +228,6 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         uint256[] calldata withdrawalDelayBlocks
     ) external onlyOwner {
         _setStrategyWithdrawalDelayBlocks(strategies, withdrawalDelayBlocks);
-    }
-
-    //迁移旧版本的排队提款到新版本
-    function migrateQueuedWithdrawals(IStrategyManager.DeprecatedStruct_QueuedWithdrawal[] memory withdrawalsToMigrate)
-        external
-    {
-        for (uint256 i = 0; i < withdrawalsToMigrate.length;) {
-            IStrategyManager.DeprecatedStruct_QueuedWithdrawal memory withdrawalToMigrate = withdrawalsToMigrate[i];
-            (bool isDeleted, bytes32 oldWithdrawalRoot) = i_strategyManager.migrateQueuedWithdrawal(withdrawalToMigrate);
-            if (isDeleted) {
-                address staker = withdrawalToMigrate.staker;
-                uint256 nonce = cumulativeWithdrawalsQueued[staker];
-                cumulativeWithdrawalsQueued[staker]++;
-
-                Withdrawal memory migratedWithdrawal = Withdrawal({
-                    staker: staker,
-                    delegatedTo: withdrawalToMigrate.delegatedAddress,
-                    withdrawer: withdrawalToMigrate.withdrawerAndNonce.withdrawer,
-                    nonce: nonce,
-                    startBlock: withdrawalToMigrate.withdrawalStartBlock,
-                    strategies: withdrawalToMigrate.strategies,
-                    shares: withdrawalToMigrate.shares
-                });
-                bytes32 newRoot = calculateWithdrawalRoot(migratedWithdrawal);
-                require(
-                    !pendingWithdrawals[newRoot],
-                    "DelegationManager.migrateQueuedWithdrawals: withdrawal already exists"
-                );
-                pendingWithdrawals[newRoot] = true;
-                emit WithdrawalQueued(newRoot, migratedWithdrawal);
-                emit WithdrawalMigrated(oldWithdrawalRoot, newRoot);
-            }
-            unchecked {
-                ++i;
-            }
-        }
     }
 
     /*******************************************************************************
