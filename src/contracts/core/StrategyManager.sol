@@ -115,8 +115,30 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         _addShares(staker, mantaToken, strategy, shares);
     }
 
+    function withdrawSharesAsTokens(address recipient, IStrategyBase strategy, uint256 shares, IERC20 tokenAddress)
+        external
+        onlyDelegationManager
+    {
+        strategy.withdraw(recipient, tokenAddress, shares);
+    }
+
     function getStakerStrategyShares(address user, IStrategyBase strategy) external view returns (uint256 shares) {
         return stakerStrategyShares[user][strategy];
+    }
+
+    //迁移旧版本的排队提款
+    function migrateQueuedWithdrawal(DeprecatedStruct_QueuedWithdrawal memory queuedWithdrawal)
+        external
+        onlyDelegationManager
+        returns (bool, bytes32)
+    {
+        bytes32 existingWithdrawalRoot = calculateWithdrawalRoot(queuedWithdrawal);
+        bool isDeleted;
+        if (withdrawalRootPending[existingWithdrawalRoot]) {
+            withdrawalRootPending[existingWithdrawalRoot] = false;
+            isDeleted = true;
+        }
+        return (isDeleted, existingWithdrawalRoot);
     }
 
     function setStrategyWhitelister(address newStrategyWhitelister) external onlyOwner {
@@ -224,14 +246,14 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
         stakerStrategyShares[staker][strategy] = userShares;
         if (userShares == 0) {
             //从质押池中移除该策略
-            _removeStrategyFormStakerStrategyList(staker, strategy);
+            _removeStrategyFromStakerStrategyList(staker, strategy);
             return true;
         }
         return false;
     }
 
     //完全取款时，对应策略已经没有shares了，需要将shares从stakerStrategyList中移除
-    function _removeStrategyFormStakerStrategyList(address staker, IStrategyBase strategy) internal {
+    function _removeStrategyFromStakerStrategyList(address staker, IStrategyBase strategy) internal {
         uint256 stratsLength = stakerStrategyList[staker].length;
         uint256 j = 0;
         for (; j < stratsLength;) {
@@ -271,5 +293,22 @@ contract StrategyManager is Initializable, OwnableUpgradeable, ReentrancyGuard, 
 
     function stakerStrategyListLength(address staker) external view returns (uint256) {
         return stakerStrategyList[staker].length;
+    }
+
+    function calculateWithdrawalRoot(DeprecatedStruct_QueuedWithdrawal memory queuedWithdrawal)
+        public
+        pure
+        returns (bytes32)
+    {
+        return (keccak256(
+                abi.encode(
+                    queuedWithdrawal.strategies,
+                    queuedWithdrawal.shares,
+                    queuedWithdrawal.staker,
+                    queuedWithdrawal.withdrawerAndNonce,
+                    queuedWithdrawal.withdrawalStartBlock,
+                    queuedWithdrawal.delegatedAddress
+                )
+            ));
     }
 }

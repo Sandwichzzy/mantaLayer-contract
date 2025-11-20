@@ -155,6 +155,40 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         return withdrawalRoots;
     }
 
+    //部分取款，和undelegate区别是没有解除委托关系
+    function queueWithdrawals(QueuedWithdrawalParams[] calldata queuedWithdrawalParams)
+        external
+        returns (bytes32[] memory)
+    {
+        bytes32[] memory withdrawalRoots = new bytes32[](queuedWithdrawalParams.length);
+        address operator = delegatedTo[msg.sender];
+        for (uint256 i = 0; i < queuedWithdrawalParams.length; i++) {
+            require(
+                queuedWithdrawalParams[i].strategies.length == queuedWithdrawalParams[i].shares.length,
+                "DelegationManager.queueWithdrawals: Lengths of strategies and shares do not match"
+            );
+            //解除staker委托给operator的shares,将staker在策略里面的shares部分解除，生成排队取款交易
+            withdrawalRoots[i] = _removeSharesAndQueueWithdrawal({
+                staker: queuedWithdrawalParams[i].withdrawer,
+                operator: operator,
+                withdrawer: queuedWithdrawalParams[i].withdrawer,
+                strategies: queuedWithdrawalParams[i].strategies,
+                shares: queuedWithdrawalParams[i].shares
+            });
+        }
+        return withdrawalRoots;
+    }
+
+    function completeQueuedWithdrawal(Withdrawal calldata withdrawal, IERC20 mantaToken) external nonReentrant {
+        _completeQueuedWithdrawal(withdrawal, mantaToken);
+    }
+
+    function completeQueuedWithdrawals(Withdrawal[] calldata withdrawals, IERC20 mantaToken) external nonReentrant {
+        for (uint256 i = 0; i < withdrawals.length; ++i) {
+            _completeQueuedWithdrawal(withdrawals[i], mantaToken);
+        }
+    }
+
     function setMinWithdrawalDelayBlocks(uint256 newMinWithdrawalDelayBlocks) external onlyOwner {
         _setMinWithdrawalDelayBlocks(newMinWithdrawalDelayBlocks);
     }
@@ -177,6 +211,13 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
             address operator = delegatedTo[staker];
             _decreaseOperatorShares({operator: operator, staker: staker, strategy: strategy, shares: shares});
         }
+    }
+
+    function setStrategyWithdrawalDelayBlocks(
+        IStrategyBase[] calldata strategies,
+        uint256[] calldata withdrawalDelayBlocks
+    ) external onlyOwner {
+        _setStrategyWithdrawalDelayBlocks(strategies, withdrawalDelayBlocks);
     }
 
     /*******************************************************************************
@@ -346,6 +387,53 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
 
         emit WithdrawalQueued(withdrawalRoot, withdrawal);
         return withdrawalRoot;
+    }
+
+    function _completeQueuedWithdrawal(Withdrawal memory withdrawal, IERC20 mantaToken) internal {
+        bytes32 withdrawalRoot = calculateWithdrawalRoot(withdrawal);
+        //判断withdrawalRoot是否在待处理排队取款队列中
+        require(
+            pendingWithdrawals[withdrawalRoot],
+            "DelegationManager._completeQueuedWithdrawal: withdrawal not found in pendingWithdrawals queue"
+        );
+        //判断要提现的交易是否已经过了最小提款延迟区块数
+        require(
+            withdrawal.startBlock + minWithdrawalDelayBlocks <= block.number,
+            "DelegationManager._completeQueuedWithdrawal: minWithdrawalDelayBlocks period has not yet passed"
+        );
+        //判断提现者是否正确
+        require(
+            msg.sender == withdrawal.withdrawer,
+            "DelegationManager._completeQueuedWithdrawal: only withdrawer can complete action"
+        );
+        //将pendingWithdrawals中的取款请求删除
+        delete pendingWithdrawals[withdrawalRoot];
+        address currentOperator = delegatedTo[msg.sender];
+        for (uint256 i = 0; i < withdrawal.strategies.length;) {
+            //每个质押的策略都要检查是否过了该策略的提款延迟区块数
+            require(
+                withdrawal.startBlock + strategyWithdrawalDelayBlocks[withdrawal.strategies[i]] <= block.number,
+                "DelegationManager._completeQueuedWithdrawal: withdrawalDelayBlocks period has not yet passed for this strategy"
+            );
+            //将shares转换成token并提现给withdrawer
+            _withdrawSharesAsTokens({
+                withdrawer: msg.sender,
+                strategy: withdrawal.strategies[i],
+                shares: withdrawal.shares[i],
+                mantaToken: mantaToken
+            });
+            emit WithdrawalCompleted(currentOperator, msg.sender, withdrawal.strategies[i], withdrawal.shares[i]);
+
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function _withdrawSharesAsTokens(address withdrawer, IStrategyBase strategy, uint256 shares, IERC20 mantaToken)
+        internal
+    {
+        i_strategyManager.withdrawSharesAsTokens(withdrawer, strategy, shares, mantaToken);
     }
 
     /*******************************************************************************
