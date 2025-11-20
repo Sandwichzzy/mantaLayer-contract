@@ -220,6 +220,42 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         _setStrategyWithdrawalDelayBlocks(strategies, withdrawalDelayBlocks);
     }
 
+    //迁移旧版本的排队提款到新版本
+    function migrateQueuedWithdrawals(IStrategyManager.DeprecatedStruct_QueuedWithdrawal[] memory withdrawalsToMigrate)
+        external
+    {
+        for (uint256 i = 0; i < withdrawalsToMigrate.length;) {
+            IStrategyManager.DeprecatedStruct_QueuedWithdrawal memory withdrawalToMigrate = withdrawalsToMigrate[i];
+            (bool isDeleted, bytes32 oldWithdrawalRoot) = i_strategyManager.migrateQueuedWithdrawal(withdrawalToMigrate);
+            if (isDeleted) {
+                address staker = withdrawalToMigrate.staker;
+                uint256 nonce = cumulativeWithdrawalsQueued[staker];
+                cumulativeWithdrawalsQueued[staker]++;
+
+                Withdrawal memory migratedWithdrawal = Withdrawal({
+                    staker: staker,
+                    delegatedTo: withdrawalToMigrate.delegatedAddress,
+                    withdrawer: withdrawalToMigrate.withdrawerAndNonce.withdrawer,
+                    nonce: nonce,
+                    startBlock: withdrawalToMigrate.withdrawalStartBlock,
+                    strategies: withdrawalToMigrate.strategies,
+                    shares: withdrawalToMigrate.shares
+                });
+                bytes32 newRoot = calculateWithdrawalRoot(migratedWithdrawal);
+                require(
+                    !pendingWithdrawals[newRoot],
+                    "DelegationManager.migrateQueuedWithdrawals: withdrawal already exists"
+                );
+                pendingWithdrawals[newRoot] = true;
+                emit WithdrawalQueued(newRoot, migratedWithdrawal);
+                emit WithdrawalMigrated(oldWithdrawalRoot, newRoot);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /*******************************************************************************
                             INTERNAL FUNCTIONS
     *******************************************************************************/
@@ -455,6 +491,10 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         return (_operatorDetails[operator].earningsReceiver != address(0));
     }
 
+    function operatorDetails(address operator) external view returns (OperatorDetails memory) {
+        return _operatorDetails[operator];
+    }
+
     function getDelegatableShares(address staker) public view returns (IStrategyBase[] memory, uint256[] memory) {
         (IStrategyBase[] memory strategyManagerStrats, uint256[] memory strategyManagerShares) =
             i_strategyManager.getDeposits(staker);
@@ -501,5 +541,41 @@ contract DelegationManager is Initializable, OwnableUpgradeable, ReentrancyGuard
         );
         bytes32 approverDigestHash = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), approverStructHash));
         return approverDigestHash;
+    }
+
+    function earningsReceiver(address operator) external view returns (address) {
+        return _operatorDetails[operator].earningsReceiver;
+    }
+
+    function delegationApprover(address operator) external view returns (address) {
+        return _operatorDetails[operator].delegationApprover;
+    }
+
+    //获取操作员的质押者选择退出窗口期（区块数）
+    function stakerOptOutWindowBlocks(address operator) external view returns (uint256) {
+        return _operatorDetails[operator].stakerOptOutWindowBlocks;
+    }
+
+    function getOperatorShares(address operator, IStrategyBase[] memory strategies)
+        public
+        view
+        returns (uint256[] memory)
+    {
+        uint256[] memory shares = new uint256[](strategies.length);
+        for (uint256 i = 0; i < strategies.length; ++i) {
+            shares[i] = operatorShares[operator][strategies[i]];
+        }
+        return shares;
+    }
+
+    function getWithdrawalDelay(IStrategyBase[] calldata strategies) public view returns (uint256) {
+        uint256 withdrawalDelay = minWithdrawalDelayBlocks;
+        for (uint256 i = 0; i < strategies.length; i++) {
+            uint256 strategyDelay = strategyWithdrawalDelayBlocks[strategies[i]];
+            if (strategyDelay > withdrawalDelay) {
+                withdrawalDelay = strategyDelay;
+            }
+        }
+        return withdrawalDelay;
     }
 }
